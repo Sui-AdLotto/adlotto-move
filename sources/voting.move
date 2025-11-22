@@ -2,8 +2,10 @@ module adlotto::voting;
 
 use adlotto::ad_entry::{Self, Advertisement};
 use adlotto::lottery::{Self, LotteryEpoch};
-use adlotto::ad_staking::{Self as staking, StakingPosition};
+use adlotto::mock_staking_yield_protocol::{Self as protocol, MockStakingYieldProtocol, StakingPosition};
+use adlotto::mock_sui::MOCK_SUI;
 use sui::clock::{Self, Clock};
+use sui::coin::TreasuryCap;
 use sui::event;
 use sui::object::{Self, UID, ID};
 use sui::transfer;
@@ -35,7 +37,8 @@ public struct VotingRecord has key {
     epoch: u64,
     total_votes: u64, // Total votes in this epoch
     voters: VecSet<address>, // Unique voters
-    reward_per_vote: u64, // Reward amount per vote
+    winner_total_yield: u64, // Total yield from winner (to be split)
+    voter_yield_share: u64, // 50% of winner's yield for voters
 }
 
 // ======== Events ========
@@ -65,13 +68,14 @@ public struct VotingRewardsDistributed has copy, drop {
 // ======== Admin Functions ========
 
 /// Create a new voting record for an epoch
-public fun create_voting_record(epoch: u64, reward_per_vote: u64, ctx: &mut TxContext) {
+public fun create_voting_record(epoch: u64, ctx: &mut TxContext) {
     let record = VotingRecord {
         id: object::new(ctx),
         epoch,
         total_votes: 0,
         voters: vec_set::empty(),
-        reward_per_vote,
+        winner_total_yield: 0,
+        voter_yield_share: 0,
     };
     transfer::share_object(record);
 }
@@ -90,7 +94,7 @@ public entry fun cast_vote(
     let voter = sui::tx_context::sender(ctx);
 
     // Verify ownership of staking position
-    assert!(staking::get_position_owner(staking_position) == voter, ENotStakeholder);
+    assert!(protocol::get_position_owner(staking_position) == voter, ENotStakeholder);
 
     // Verify epoch is active
     assert!(lottery::is_epoch_active(epoch, clock), EEpochNotActive);
@@ -102,12 +106,12 @@ public entry fun cast_vote(
     assert!(ad_entry::is_active(ad), EInvalidAd);
 
     // Calculate voting power based on stake
-    let voting_power = staking::get_voting_power(staking_position);
+    let voting_power = protocol::get_voting_power(staking_position);
 
     let vote_uid = object::new(ctx);
     let vote_id = object::uid_to_inner(&vote_uid);
     let ad_id = object::uid_to_inner(ad_entry::get_ad_uid(ad));
-    let position_id = staking::get_position_id(staking_position);
+    let position_id = protocol::get_position_id(staking_position);
 
     let current_epoch = clock::timestamp_ms(clock) / 86400000;
 
@@ -144,26 +148,33 @@ public entry fun cast_vote(
     transfer::transfer(vote, voter);
 }
 
-/// Claim voting reward
+/// Claim voting reward (auto-mint yield based on proportional share)
 public entry fun claim_voting_reward(
     vote: &mut Vote,
     voting_record: &VotingRecord,
-    staking_position: &mut StakingPosition,
-    ctx: &TxContext,
+    treasury: &mut TreasuryCap<MOCK_SUI>,
+    ctx: &mut TxContext,
 ) {
     let sender = sui::tx_context::sender(ctx);
     assert!(vote.voter == sender, ENotStakeholder);
     assert!(!vote.reward_claimed, ERewardAlreadyClaimed);
     assert!(vote.epoch == voting_record.epoch, EVoteNotFound);
 
-    // Calculate reward
-    let reward_amount = vote.voting_power * voting_record.reward_per_vote / 10000;
+    // Calculate proportional share: (voter_power / total_votes) * 50% of winner yield
+    let reward_amount = if (voting_record.total_votes > 0) {
+        (vote.voting_power * voting_record.voter_yield_share) / voting_record.total_votes
+    } else {
+        0
+    };
 
     // Mark as claimed
     vote.reward_claimed = true;
 
-    // Add reward to staking position
-    staking::add_voting_rewards(staking_position, reward_amount);
+    // Mint and transfer yield to voter
+    if (reward_amount > 0) {
+        let yield_coin = protocol::mint_voter_yield(treasury, reward_amount, sender, ctx);
+        transfer::public_transfer(yield_coin, sender);
+    };
 
     event::emit(VotingRewardClaimed {
         vote_id: object::uid_to_inner(&vote.id),
@@ -175,21 +186,19 @@ public entry fun claim_voting_reward(
 
 // ======== Admin/System Functions ========
 
-/// Distribute voting rewards at epoch end (called by admin/system)
-public entry fun distribute_voting_rewards(
+/// Set winner's yield for distribution (called by lottery module after epoch ends)
+public(package) fun set_winner_yield(
     voting_record: &mut VotingRecord,
-    total_reward_pool: u64,
-    ctx: &TxContext,
+    winner_total_yield: u64,
 ) {
-    // Calculate reward per vote
-    if (voting_record.total_votes > 0) {
-        voting_record.reward_per_vote = (total_reward_pool * 10000) / voting_record.total_votes;
-    };
+    voting_record.winner_total_yield = winner_total_yield;
+    // 50% goes to voters
+    voting_record.voter_yield_share = winner_total_yield / 2;
 
     event::emit(VotingRewardsDistributed {
         epoch: voting_record.epoch,
-        total_rewards: total_reward_pool,
-        reward_per_vote: voting_record.reward_per_vote,
+        total_rewards: voting_record.voter_yield_share,
+        reward_per_vote: 0, // Calculated per voter proportionally
         total_voters: vec_set::size(&voting_record.voters),
     });
 }
@@ -222,9 +231,9 @@ public fun get_voting_record_stats(
     u64, // epoch
     u64, // total_votes
     u64, // total_voters
-    u64, // reward_per_vote
+    u64, // voter_yield_share
 ) {
-    (record.epoch, record.total_votes, vec_set::size(&record.voters), record.reward_per_vote)
+    (record.epoch, record.total_votes, vec_set::size(&record.voters), record.voter_yield_share)
 }
 
 public fun has_voted(record: &VotingRecord, voter: address): bool {
@@ -234,13 +243,15 @@ public fun has_voted(record: &VotingRecord, voter: address): bool {
 public fun get_pending_reward(vote: &Vote, voting_record: &VotingRecord): u64 {
     if (vote.reward_claimed || vote.epoch != voting_record.epoch) {
         0
+    } else if (voting_record.total_votes > 0) {
+        (vote.voting_power * voting_record.voter_yield_share) / voting_record.total_votes
     } else {
-        vote.voting_power * voting_record.reward_per_vote / 10000
+        0
     }
 }
 
 // ======== Test Functions ========
 #[test_only]
 public fun init_for_testing(ctx: &mut TxContext) {
-    create_voting_record(1, 100, ctx); // Epoch 1, 100 reward per vote
+    create_voting_record(1, ctx); // Epoch 1
 }
