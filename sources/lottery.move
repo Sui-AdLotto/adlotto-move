@@ -38,7 +38,6 @@ public struct LotteryConfig has key {
     epoch_duration: u64, // Duration in milliseconds
     current_epoch: u64, // Current epoch number
     voting_weight_per_stake: u64, // Voting power per SUI staked (basis points)
-    platform_fee_bps: u64, // Platform fee in basis points (200 = 2%)
     admin: address,
     current_epoch_id: Option<ID>, // ID of current active epoch
 }
@@ -73,7 +72,6 @@ public struct WinnerUnsealed has copy, drop {
 /// Initialize the LotteryConfig (called once during deployment)
 public fun create_config(
     voting_weight_per_stake: u64,
-    platform_fee_bps: u64,
     admin: address,
     ctx: &mut TxContext,
 ) {
@@ -82,7 +80,6 @@ public fun create_config(
         epoch_duration: EPOCH_DURATION_MS,
         current_epoch: 0,
         voting_weight_per_stake,
-        platform_fee_bps,
         admin,
         current_epoch_id: std::option::none(),
     };
@@ -279,13 +276,11 @@ public fun get_config_details(
     u64, // current_epoch
     u64, // epoch_duration
     u64, // voting_weight_per_stake
-    u64, // platform_fee_bps
 ) {
     (
         config.current_epoch,
         config.epoch_duration,
         config.voting_weight_per_stake,
-        config.platform_fee_bps,
     )
 }
 
@@ -293,9 +288,6 @@ public fun get_current_epoch_number(config: &LotteryConfig): u64 {
     config.current_epoch
 }
 
-public fun get_platform_fee_bps(config: &LotteryConfig): u64 {
-    config.platform_fee_bps
-}
 
 // ======== Internal Helper Functions ========
 
@@ -353,7 +345,6 @@ fun vector_contains(vec: &vector<ID>, item: &ID): bool {
 public fun init_for_testing(ctx: &mut TxContext) {
     create_config(
         10000, // 1:1 voting weight
-        200, // 2% platform fee
         sui::tx_context::sender(ctx),
         ctx,
     );

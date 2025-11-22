@@ -37,15 +37,6 @@ public struct VotingRewardsFunded has copy, drop {
     total_voting_rewards: u64,
 }
 
-public struct FeesCollected has copy, drop {
-    amount: u64,
-    total_fees: u64,
-}
-
-public struct FeesWithdrawn has copy, drop {
-    amount: u64,
-    recipient: address,
-}
 
 public struct YieldDistributed has copy, drop {
     amount: u64,
@@ -98,40 +89,6 @@ public entry fun fund_voting_rewards(
     });
 }
 
-/// Collect platform fees
-public entry fun collect_fees(treasury: &mut Treasury, fee_coin: Coin<MOCK_SUI>, ctx: &TxContext) {
-    assert!(sui::tx_context::sender(ctx) == treasury.admin, ENotAdmin);
-
-    let amount = coin::value(&fee_coin);
-    balance::join(&mut treasury.balance, coin::into_balance(fee_coin));
-    treasury.total_fees_collected = treasury.total_fees_collected + amount;
-
-    event::emit(FeesCollected {
-        amount,
-        total_fees: treasury.total_fees_collected,
-    });
-}
-
-/// Withdraw platform fees (admin only)
-public entry fun withdraw_fees(
-    treasury: &mut Treasury,
-    amount: u64,
-    recipient: address,
-    ctx: &mut TxContext,
-) {
-    assert!(sui::tx_context::sender(ctx) == treasury.admin, ENotAdmin);
-    assert!(balance::value(&treasury.balance) >= amount, EInsufficientBalance);
-
-    let withdrawn = balance::split(&mut treasury.balance, amount);
-    let coin = coin::from_balance(withdrawn, ctx);
-
-    event::emit(FeesWithdrawn {
-        amount,
-        recipient,
-    });
-
-    transfer::public_transfer(coin, recipient);
-}
 
 // ======== System Functions (Package Visibility) ========
 
@@ -171,16 +128,6 @@ public(package) fun distribute_voting_reward(
     transfer::public_transfer(reward_coin, recipient);
 }
 
-/// Calculate and collect platform fee
-public(package) fun collect_platform_fee(
-    treasury: &mut Treasury,
-    total_amount: u64,
-    fee_bps: u64,
-): u64 {
-    let fee_amount = (total_amount * fee_bps) / 10000;
-    treasury.total_fees_collected = treasury.total_fees_collected + fee_amount;
-    fee_amount
-}
 
 // ======== View Functions ========
 

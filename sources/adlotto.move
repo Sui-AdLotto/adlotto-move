@@ -2,7 +2,7 @@ module adlotto::adlotto;
 
 use adlotto::ad_entry;
 use adlotto::lottery;
-use adlotto::ad_staking as staking;
+use adlotto::mock_staking_yield_protocol as protocol;
 use adlotto::treasury;
 use sui::tx_context::{TxContext, sender};
 
@@ -12,17 +12,13 @@ fun init(ctx: &mut TxContext) {
 
     // Initialize AdRegistry
     ad_entry::create_registry(
-        1000000000, // 1 SUI minimum stake
-        1000, // Max 1000 ads per epoch
         admin,
         ctx,
     );
 
-    // Initialize StakingPool
-    staking::create_pool(
-        800, // 8% APY (800 basis points)
-        100000000, // 0.1 SUI minimum stake
-        100000000000, // 100 SUI maximum stake
+    // Initialize MockStakingYieldProtocol
+    protocol::create_protocol(
+        10000, // 100% APY (10000 basis points)
         admin,
         ctx,
     );
@@ -30,7 +26,6 @@ fun init(ctx: &mut TxContext) {
     // Initialize LotteryConfig
     lottery::create_config(
         10000, // 1:1 voting weight (10000 basis points)
-        200, // 2% platform fee (200 basis points)
         admin,
         ctx,
     );
