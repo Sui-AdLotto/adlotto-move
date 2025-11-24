@@ -59,6 +59,7 @@ public struct EpochFinalized has copy, drop {
     blob_id: ID,
     advertiser: address,
     timestamp: u64,
+    encryption_id: vector<u8>,
 }
 /// This is not stored on-chain, just returned by view functions.
 public struct LotteryState has copy, drop {
@@ -159,6 +160,7 @@ public entry fun finalize_epoch(
         wins_count,
         is_active,
         is_unsealed,
+        encryption_id,
     ) = ad_entry::get_ad_details(winner_ad_obj);
     let now = sui::clock::timestamp_ms(clock);
 
@@ -176,6 +178,7 @@ public entry fun finalize_epoch(
         blob_id: blob_id,
         advertiser: advertiser,
         timestamp: now,
+        encryption_id: encryption_id,
     });
     transfer::public_freeze_object(record);
 }

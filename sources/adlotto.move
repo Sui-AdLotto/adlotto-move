@@ -3,6 +3,7 @@ module adlotto::adlotto;
 use adlotto::ad_entry;
 use adlotto::lottery;
 use adlotto::mock_staking_yield_protocol as protocol;
+use adlotto::mock_sui;
 use adlotto::treasury;
 use sui::tx_context::{TxContext, sender};
 
@@ -25,7 +26,6 @@ fun init(ctx: &mut TxContext) {
 
     // Initialize LotteryConfig
     lottery::create_config(
-        10000, // 1:1 voting weight (10000 basis points)
         admin,
         ctx,
     );
