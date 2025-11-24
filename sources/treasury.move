@@ -1,12 +1,12 @@
 module adlotto::treasury;
 
+use adlotto::mock_sui::{Self, MOCK_SUI};
 use sui::balance::{Self, Balance};
-use sui::coin::{Self, Coin};
+use sui::coin::{Self, Coin, TreasuryCap};
 use sui::event;
 use sui::object::{Self, UID};
 use sui::transfer;
 use sui::tx_context::TxContext;
-use adlotto::mock_sui::MOCK_SUI;
 
 // ======== Error Codes ========
 const ENotAdmin: u64 = 1;
@@ -37,7 +37,6 @@ public struct VotingRewardsFunded has copy, drop {
     total_voting_rewards: u64,
 }
 
-
 public struct YieldDistributed has copy, drop {
     amount: u64,
     recipient: address,
@@ -60,7 +59,11 @@ public fun create_treasury(admin: address, ctx: &mut TxContext) {
 }
 
 /// Deposit yield to the pool
-public entry fun deposit_yield(treasury: &mut Treasury, yield_coin: Coin<MOCK_SUI>, ctx: &TxContext) {
+public entry fun deposit_yield(
+    treasury: &mut Treasury,
+    yield_coin: Coin<MOCK_SUI>,
+    ctx: &TxContext,
+) {
     assert!(sui::tx_context::sender(ctx) == treasury.admin, ENotAdmin);
 
     let amount = coin::value(&yield_coin);
@@ -72,65 +75,40 @@ public entry fun deposit_yield(treasury: &mut Treasury, yield_coin: Coin<MOCK_SU
     });
 }
 
-/// Fund voting rewards pool
-public entry fun fund_voting_rewards(
+public entry fun admin_fund_yield(
     treasury: &mut Treasury,
-    reward_coin: Coin<MOCK_SUI>,
-    ctx: &TxContext,
+    treasury_cap: &mut TreasuryCap<MOCK_SUI>,
+    amount: u64,
+    ctx: &mut TxContext,
 ) {
-    assert!(sui::tx_context::sender(ctx) == treasury.admin, ENotAdmin);
+    // 1. Mint new coins
+    let new_coin = adlotto::mock_sui::mint(treasury_cap, amount, ctx);
 
-    let amount = coin::value(&reward_coin);
-    balance::join(&mut treasury.voting_rewards_pool, coin::into_balance(reward_coin));
+    // 2. Deposit directly to reserves
+    balance::join(&mut treasury.yield_reserves, coin::into_balance(new_coin));
 
-    event::emit(VotingRewardsFunded {
+    // 3. Emit event
+    event::emit(YieldDeposited {
         amount,
-        total_voting_rewards: balance::value(&treasury.voting_rewards_pool),
+        total_yield_reserve: balance::value(&treasury.yield_reserves),
     });
 }
 
-
-// ======== System Functions (Package Visibility) ========
-
-/// Distribute yield to a recipient (called by staking module)
-public(package) fun distribute_yield(
+public fun withdraw_yield(
     treasury: &mut Treasury,
     amount: u64,
-    recipient: address,
     ctx: &mut TxContext,
-) {
-    assert!(balance::value(&treasury.yield_reserves) >= amount, EInsufficientYieldReserve);
+): Coin<MOCK_SUI> {
+    // In production: Add assert!(msg_sender is verification_module)
+    // Check if there's sufficient balance before attempting to split
+    let available = balance::value(&treasury.yield_reserves);
+    assert!(available >= amount, EInsufficientYieldReserve);
 
-    let yield_amount = balance::split(&mut treasury.yield_reserves, amount);
-    let yield_coin = coin::from_balance(yield_amount, ctx);
-
-    event::emit(YieldDistributed {
-        amount,
-        recipient,
-        remaining_reserve: balance::value(&treasury.yield_reserves),
-    });
-
-    transfer::public_transfer(yield_coin, recipient);
+    let balance = balance::split(&mut treasury.yield_reserves, amount);
+    coin::from_balance(balance, ctx)
 }
-
-/// Distribute voting rewards (called by voting module)
-public(package) fun distribute_voting_reward(
-    treasury: &mut Treasury,
-    amount: u64,
-    recipient: address,
-    ctx: &mut TxContext,
-) {
-    assert!(balance::value(&treasury.voting_rewards_pool) >= amount, EInsufficientVotingRewards);
-
-    let reward_amount = balance::split(&mut treasury.voting_rewards_pool, amount);
-    let reward_coin = coin::from_balance(reward_amount, ctx);
-
-    transfer::public_transfer(reward_coin, recipient);
-}
-
 
 // ======== View Functions ========
-
 public fun get_treasury_stats(
     treasury: &Treasury,
 ): (
@@ -145,22 +123,6 @@ public fun get_treasury_stats(
         balance::value(&treasury.yield_reserves),
         balance::value(&treasury.voting_rewards_pool),
     )
-}
-
-public fun get_yield_reserve(treasury: &Treasury): u64 {
-    balance::value(&treasury.yield_reserves)
-}
-
-public fun get_voting_rewards_pool(treasury: &Treasury): u64 {
-    balance::value(&treasury.voting_rewards_pool)
-}
-
-public fun get_platform_balance(treasury: &Treasury): u64 {
-    balance::value(&treasury.balance)
-}
-
-public fun get_total_fees_collected(treasury: &Treasury): u64 {
-    treasury.total_fees_collected
 }
 
 public fun get_admin(treasury: &Treasury): address {

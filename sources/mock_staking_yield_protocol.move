@@ -1,5 +1,6 @@
 module adlotto::mock_staking_yield_protocol;
 
+use adlotto::mock_sui::{Self, MOCK_SUI};
 use sui::balance::{Self, Balance};
 use sui::clock::{Self, Clock};
 use sui::coin::{Self, Coin, TreasuryCap};
@@ -7,7 +8,6 @@ use sui::event;
 use sui::object::{Self, UID, ID};
 use sui::transfer;
 use sui::tx_context::TxContext;
-use adlotto::mock_sui::{Self, MOCK_SUI};
 
 // ======== Error Codes ========
 const ENotOwner: u64 = 1;
@@ -71,11 +71,7 @@ public struct YieldMinted has copy, drop {
 // ======== Admin Functions ========
 
 /// Initialize the MockStakingYieldProtocol (called once during deployment)
-public fun create_protocol(
-    apy_rate: u64,
-    admin: address,
-    ctx: &mut TxContext,
-) {
+public fun create_protocol(apy_rate: u64, admin: address, ctx: &mut TxContext) {
     let protocol = MockStakingYieldProtocol {
         id: object::new(ctx),
         total_staked: 0,
@@ -84,12 +80,6 @@ public fun create_protocol(
         admin,
     };
     transfer::share_object(protocol);
-}
-
-/// Update APY rate (admin only)
-public entry fun update_apy(protocol: &mut MockStakingYieldProtocol, new_apy_rate: u64, ctx: &TxContext) {
-    assert!(sui::tx_context::sender(ctx) == protocol.admin, ENotAdmin);
-    protocol.apy_rate = new_apy_rate;
 }
 
 // ======== Package Functions (called by ad_entry module) ========
@@ -131,15 +121,28 @@ public(package) fun create_position_for_ad(
 
     // Transfer position NFT to owner
     transfer::transfer(position, owner);
-    
+
     position_id
 }
 
-/// Unstake position (called when unstaking ad)
-public(package) fun unstake_position(
+/// Unstake position and return coins to owner
+public entry fun unstake_position(
     protocol: &mut MockStakingYieldProtocol,
+    treasury_cap: &mut TreasuryCap<MOCK_SUI>,
     position: StakingPosition,
-    treasury: &mut TreasuryCap<MOCK_SUI>,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let coins = unstake_position_internal(protocol, treasury_cap, position, clock, ctx);
+    let sender = sui::tx_context::sender(ctx);
+    transfer::public_transfer(coins, sender);
+}
+
+/// Internal unstake logic (used by entry function and potentially other modules)
+fun unstake_position_internal(
+    protocol: &mut MockStakingYieldProtocol,
+    treasury_cap: &mut TreasuryCap<MOCK_SUI>,
+    position: StakingPosition,
     clock: &Clock,
     ctx: &mut TxContext,
 ): Coin<MOCK_SUI> {
@@ -156,7 +159,6 @@ public(package) fun unstake_position(
     );
 
     let total_yield = pending_yield + position.advertiser_yield_claimable;
-    let total_withdrawal = position.amount + total_yield;
 
     // Update protocol
     protocol.total_staked = protocol.total_staked - position.amount;
@@ -167,7 +169,7 @@ public(package) fun unstake_position(
 
     // Mint yield (auto-mint for mock protocol)
     if (total_yield > 0) {
-        let yield_coin = mock_sui::mint(treasury, total_yield, ctx);
+        let yield_coin = mock_sui::mint(treasury_cap, total_yield, ctx);
         coin::join(&mut principal_coin, yield_coin);
 
         event::emit(YieldMinted {
@@ -210,65 +212,57 @@ public(package) fun calculate_epoch_yield(
     calculate_yield_internal(position, protocol.apy_rate, current_epoch)
 }
 
-/// Credit advertiser's 50% yield share after winning (called by lottery module)
-public(package) fun credit_advertiser_yield(
+/// Harvest yield from a position and split 50/50 (treasury/advertiser)
+/// Returns the treasury's share as a coin
+public fun harvest_yield(
     position: &mut StakingPosition,
-    yield_amount: u64,
-) {
-    position.advertiser_yield_claimable = position.advertiser_yield_claimable + yield_amount;
-    position.last_claim_epoch = position.last_claim_epoch + 1; // Update to prevent double-counting
-}
-
-/// Mint yield for voters (called by voting module)
-public(package) fun mint_voter_yield(
-    treasury: &mut TreasuryCap<MOCK_SUI>,
-    amount: u64,
-    recipient: address,
+    protocol: &MockStakingYieldProtocol,
+    treasury_cap: &mut TreasuryCap<MOCK_SUI>,
+    clock: &Clock,
     ctx: &mut TxContext,
 ): Coin<MOCK_SUI> {
-    let yield_coin = mock_sui::mint(treasury, amount, ctx);
-    
+    let current_epoch = clock::timestamp_ms(clock) / 86400000;
+    let pending_yield = calculate_yield_internal(position, protocol.apy_rate, current_epoch);
+
+    if (pending_yield == 0) {
+        return coin::zero<MOCK_SUI>(ctx)
+    };
+
+    // Split 50/50: 50% to treasury, 50% to advertiser (stored in position)
+    let treasury_share = pending_yield / 2;
+    let advertiser_share = pending_yield - treasury_share; // Handle odd amounts
+
+    // Update position
+    position.last_claim_epoch = current_epoch;
+    position.advertiser_yield_claimable = position.advertiser_yield_claimable + advertiser_share;
+
+    // Mint treasury's share
+    let treasury_coin = mock_sui::mint(treasury_cap, treasury_share, ctx);
+
     event::emit(YieldMinted {
-        amount,
-        recipient,
+        amount: treasury_share,
+        recipient: @0x0, // Treasury address (placeholder)
     });
 
-    yield_coin
-}
-
-/// Get voting power from position amount
-public(package) fun get_voting_power(position: &StakingPosition): u64 {
-    position.amount
-}
-
-/// Get position owner
-public(package) fun get_position_owner(position: &StakingPosition): address {
-    position.owner
-}
-
-/// Get position ID
-public(package) fun get_position_id(position: &StakingPosition): ID {
-    object::uid_to_inner(&position.id)
-}
-
-/// Get position amount
-public(package) fun get_position_amount(position: &StakingPosition): u64 {
-    position.amount
-}
-
-/// Get ad ID linked to position
-public(package) fun get_ad_id(position: &StakingPosition): ID {
-    position.ad_id
+    treasury_coin
 }
 
 // ======== View Functions ========
 
-public fun calculate_yield(position: &StakingPosition, protocol: &MockStakingYieldProtocol, clock: &Clock): u64 {
+public fun calculate_yield(
+    position: &StakingPosition,
+    protocol: &MockStakingYieldProtocol,
+    clock: &Clock,
+): u64 {
     let current_epoch = clock::timestamp_ms(clock) / 86400000;
     calculate_yield_internal(position, protocol.apy_rate, current_epoch)
 }
 
-public fun get_position_value(position: &StakingPosition, protocol: &MockStakingYieldProtocol, clock: &Clock): u64 {
+public fun get_position_value(
+    position: &StakingPosition,
+    protocol: &MockStakingYieldProtocol,
+    clock: &Clock,
+): u64 {
     let pending_yield = calculate_yield(position, protocol, clock);
     position.amount + pending_yield + position.advertiser_yield_claimable
 }
@@ -293,20 +287,6 @@ public fun get_position_details(
     )
 }
 
-public fun get_protocol_stats(
-    protocol: &MockStakingYieldProtocol,
-): (
-    u64, // total_staked
-    u64, // staked_balance
-    u64, // apy_rate
-) {
-    (
-        protocol.total_staked,
-        balance::value(&protocol.staked_balance),
-        protocol.apy_rate,
-    )
-}
-
 // ======== Internal Functions ========
 
 fun calculate_yield_internal(position: &StakingPosition, apy_rate: u64, current_epoch: u64): u64 {
@@ -324,14 +304,12 @@ fun calculate_yield_internal(position: &StakingPosition, apy_rate: u64, current_
 // ======== Test Functions ========
 #[test_only]
 public fun init_for_testing(ctx: &mut TxContext) {
+    // Initialize MOCK_SUI first (treasury cap will be shared)
+    mock_sui::init_for_testing(ctx);
+    // Initialize protocol
     create_protocol(
         10000, // 100% APY
         sui::tx_context::sender(ctx),
         ctx,
     );
-}
-
-#[test_only]
-public fun mint_for_testing(ctx: &mut TxContext): Coin<MOCK_SUI> {
-    coin::mint_for_testing<MOCK_SUI>(1000000000, ctx)
 }
