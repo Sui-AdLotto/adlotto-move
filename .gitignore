@@ -1,3 +1,13 @@
 # markdown
 *.md
 !README.md
+
+scripts/*
+node_modules
+build
+.seeding-data.json
+.deployment-config.json
+.env.example
+package-lock.json
+package.json
+!scripts/start.ts
